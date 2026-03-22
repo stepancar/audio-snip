@@ -34,13 +34,12 @@ export async function fetchRange(
   if (!resp.ok && resp.status !== 206) {
     throw new Error(`HTTP ${resp.status} fetching range ${start}-${end}`);
   }
-  const full = new Uint8Array(await resp.arrayBuffer());
-  // If server ignored Range header and returned full file (200 instead of 206),
-  // slice to the requested range manually.
-  if (resp.status === 200 && full.length > end - start + 1) {
-    return full.slice(start, end + 1);
+  const data = new Uint8Array(await resp.arrayBuffer());
+  // If server ignored Range and returned full file, slice to requested range
+  if (resp.status === 200 && data.length > end - start + 1) {
+    return data.slice(start, end + 1);
   }
-  return full;
+  return data;
 }
 
 export async function fetchContentLength(
@@ -57,8 +56,20 @@ export async function fetchContentLength(
   const cr = rangeResp.headers.get('content-range');
   if (cr) {
     const match = cr.match(/\/(\d+)/);
-    if (match) return parseInt(match[1], 10);
+    if (match) {
+      await rangeResp.arrayBuffer(); // consume body
+      return parseInt(match[1], 10);
+    }
   }
+  // If no Content-Range, check Content-Length from the response itself
+  if (!cr) {
+    const cl2 = rangeResp.headers.get('content-length');
+    if (cl2) {
+      await rangeResp.arrayBuffer(); // consume body
+      return parseInt(cl2, 10);
+    }
+  }
+  await rangeResp.arrayBuffer(); // consume body
   return null;
 }
 

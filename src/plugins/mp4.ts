@@ -8,6 +8,12 @@ import {
 
 // ─── MP4Box type declarations ────────────────────────────────────────────────
 
+interface MP4EditEntry {
+  segment_duration: number;
+  media_time: number;
+  media_rate: number;
+}
+
 interface MP4Track {
   id: number;
   type: string;
@@ -23,6 +29,7 @@ interface MP4Track {
   bitrate: number;
   movie_duration: number;
   movie_timescale: number;
+  edits?: MP4EditEntry[];
 }
 
 interface MP4Sample {
@@ -153,6 +160,17 @@ export class Mp4Plugin extends BasePlugin {
     const { info, audioTrack } = await this.loadMoov(url);
     const duration = info.duration / info.timescale;
 
+    // Parse encoder delay from edit list (elst atom)
+    let encoderDelay: number;
+    const edits = audioTrack.edits;
+    if (edits && edits.length > 0 && edits[0].media_time > 0) {
+      const mediaTime = edits[0].media_time;
+      encoderDelay = Math.round(mediaTime * audioTrack.audio!.sample_rate / audioTrack.timescale);
+    } else {
+      // Default priming for AAC-LC: 1024 * 2 + 64 = 2112
+      encoderDelay = 2112;
+    }
+
     return {
       duration,
       sampleRate: audioTrack.audio!.sample_rate,
@@ -160,7 +178,7 @@ export class Mp4Plugin extends BasePlugin {
       bitrate: audioTrack.bitrate,
       codec: audioTrack.codec,
       isVbr: true, // AAC is always VBR conceptually
-      encoderDelay: 0,
+      encoderDelay,
     };
   }
 
@@ -175,6 +193,16 @@ export class Mp4Plugin extends BasePlugin {
 
     const sampleRate = audioTrack.audio!.sample_rate;
     const timescale = audioTrack.timescale;
+
+    // Parse encoder delay from edit list
+    let encoderDelay: number;
+    const edits = audioTrack.edits;
+    if (edits && edits.length > 0 && edits[0].media_time > 0) {
+      const mediaTime = edits[0].media_time;
+      encoderDelay = Math.round(mediaTime * sampleRate / timescale);
+    } else {
+      encoderDelay = 2112; // Default AAC-LC priming
+    }
 
     // Step 2: Use sample table to find which samples fall in [startTime, endTime]
     const allSamples = mp4.getTrackSamplesInfo(audioTrack.id);
@@ -227,7 +255,9 @@ export class Mp4Plugin extends BasePlugin {
     for (const si of neededSamples) {
       // Find which fetched range contains this sample
       const rawData = this.readSampleFromRanges(si.offset, si.size, ranges, rangeData);
-      if (!rawData) continue; // skip if data not available (shouldn't happen)
+      if (!rawData) {
+        throw new Error(`Failed to read sample at offset ${si.offset}, size ${si.size} — byte range not fetched`);
+      }
 
       const adtsHeader = makeAdtsHeader(
         rawData.length,
@@ -259,7 +289,7 @@ export class Mp4Plugin extends BasePlugin {
     const decodedRate = decoded.sampleRate;
     const rangeStartTime = neededSamples[0].cts / timescale;
     const trimStartSeconds = startTime - rangeStartTime;
-    const trimStartSamples = Math.round(trimStartSeconds * decodedRate);
+    const trimStartSamples = Math.round(trimStartSeconds * decodedRate) + encoderDelay;
     const wantedSamples = Math.round((endTime - startTime) * decodedRate);
 
     const startSample = Math.max(0, trimStartSamples);
@@ -328,11 +358,15 @@ export class Mp4Plugin extends BasePlugin {
     const mp4 = MP4Box.createFile();
     const fileSize = await fetchContentLength(url);
 
-    const info = await new Promise<MP4Info>((resolve, reject) => {
+    const infoPromise = new Promise<MP4Info>((resolve, reject) => {
       mp4.onReady = resolve;
       mp4.onError = reject;
       this.streamToMP4Box(mp4, url, fileSize).catch(reject);
     });
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error('Timeout: could not parse MP4 metadata within 30s')), 30000)
+    );
+    const info = await Promise.race([infoPromise, timeout]);
 
     const audioTrack = info.tracks.find((t) => t.type === 'audio');
     if (!audioTrack) throw new Error('No audio track found in MP4');

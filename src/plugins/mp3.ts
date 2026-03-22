@@ -133,7 +133,9 @@ function id3v2Size(data: Uint8Array): number {
     ((data[7] & 0x7F) << 14) |
     ((data[8] & 0x7F) << 7) |
     (data[9] & 0x7F);
-  return size + 10; // 10-byte header not included in size field
+  const flags = data[5];
+  const hasFooter = (flags & 0x10) !== 0;
+  return size + 10 + (hasFooter ? 10 : 0); // 10-byte header + optional 10-byte footer
 }
 
 // ─── Find first frame sync after given offset ───────────────────────────────
@@ -325,7 +327,7 @@ export class Mp3Plugin extends BasePlugin {
 
   async getInfo(url: string): Promise<AudioFileInfo> {
     const { header, vbrInfo, fileSize, audioStart } = await this.fetchHeader(url);
-    const duration = this.computeDuration(header, vbrInfo, fileSize, audioStart);
+    const duration = this.computeDuration(header, vbrInfo, fileSize, audioStart, vbrInfo?.encoderDelay ?? 0, vbrInfo?.encoderPadding ?? 0);
 
     return {
       duration,
@@ -344,13 +346,13 @@ export class Mp3Plugin extends BasePlugin {
     startTime: number,
     endTime: number,
   ): Promise<AudioBuffer> {
-    const { header, vbrInfo, audioStart, fileSize } = await this.fetchHeader(url);
+    const { header, vbrInfo, audioStart, xingFrameStart, fileSize } = await this.fetchHeader(url);
 
     const sampleRate = header.sampleRate;
     const encoderDelay = vbrInfo?.encoderDelay ?? 0;
     const encoderPadding = vbrInfo?.encoderPadding ?? 0;
     const isVbr = vbrInfo?.isVbr ?? false;
-    const duration = this.computeDuration(header, vbrInfo, fileSize, audioStart);
+    const duration = this.computeDuration(header, vbrInfo, fileSize, audioStart, encoderDelay, encoderPadding);
 
     // Compute byte range for the requested time segment
     let startByte: number;
@@ -360,8 +362,8 @@ export class Mp3Plugin extends BasePlugin {
     if (isVbr && vbrInfo?.toc && vbrInfo.totalBytes && duration) {
       const startFrac = Math.max(0, startTime / duration);
       const endFrac = Math.min(1, endTime / duration);
-      startByte = audioStart + tocInterpolate(vbrInfo.toc, startFrac, vbrInfo.totalBytes);
-      endByte = audioStart + tocInterpolate(vbrInfo.toc, endFrac, vbrInfo.totalBytes);
+      startByte = xingFrameStart + tocInterpolate(vbrInfo.toc, startFrac, vbrInfo.totalBytes);
+      endByte = xingFrameStart + tocInterpolate(vbrInfo.toc, endFrac, vbrInfo.totalBytes);
     } else {
       // CBR or VBR-without-TOC fallback: linear byte estimate
       if (isVbr && (!vbrInfo?.toc)) {
@@ -435,6 +437,7 @@ export class Mp3Plugin extends BasePlugin {
     header: FrameHeader;
     vbrInfo: VbrInfo | null;
     audioStart: number;
+    xingFrameStart: number;
     firstFrameOffset: number;
     fileSize: number | null;
   }> {
@@ -477,6 +480,7 @@ export class Mp3Plugin extends BasePlugin {
       header,
       vbrInfo,
       audioStart: firstFrameOffset,
+      xingFrameStart: absoluteFrameOffset,
       firstFrameOffset,
       fileSize,
     };
@@ -487,9 +491,11 @@ export class Mp3Plugin extends BasePlugin {
     vbrInfo: VbrInfo | null,
     fileSize: number | null,
     audioStart: number,
+    encoderDelay: number = 0,
+    encoderPadding: number = 0,
   ): number | null {
     if (vbrInfo?.totalFrames) {
-      const totalSamples = vbrInfo.totalFrames * header.samplesPerFrame;
+      const totalSamples = vbrInfo.totalFrames * header.samplesPerFrame - encoderDelay - encoderPadding;
       return totalSamples / header.sampleRate;
     }
     if (fileSize) {

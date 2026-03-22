@@ -60,12 +60,31 @@ describe('Mp4Plugin.decode (M4A - audio only)', () => {
     const ctx = new AudioContext();
     try {
       const info = await mp4Plugin.getInfo(M4A_URL);
-      if (info.duration) {
-        const start = Math.max(0, info.duration - 5);
-        const buffer = await audioSnip.decodeAudioDataSegment(ctx, M4A_URL, start, info.duration);
-        expect(buffer).toBeInstanceOf(AudioBuffer);
-        expect(buffer.duration).toBeGreaterThan(0);
-      }
+      expect(info.duration).not.toBeNull();
+      const start = Math.max(0, info.duration! - 5);
+      const buffer = await audioSnip.decodeAudioDataSegment(ctx, M4A_URL, start, info.duration!);
+      expect(buffer).toBeInstanceOf(AudioBuffer);
+      expect(buffer.duration).toBeGreaterThan(0);
+    } finally {
+      ctx.close();
+    }
+  }, 60000);
+});
+
+describe('Mp4Plugin metadata (bug regression)', () => {
+  it('parses encoder delay from M4A', async () => {
+    const info = await mp4Plugin.getInfo(M4A_URL);
+    // AAC files have encoder delay (edit list or default 2112)
+    expect(info.encoderDelay).toBeGreaterThan(0);
+  }, 30000);
+
+  it('consecutive segments are seamless (no gap/overlap)', async () => {
+    const ctx = new AudioContext();
+    try {
+      const seg1 = await audioSnip.decodeAudioDataSegment(ctx, M4A_URL, 10, 15);
+      const seg2 = await audioSnip.decodeAudioDataSegment(ctx, M4A_URL, 15, 20);
+      const totalDuration = seg1.duration + seg2.duration;
+      expect(Math.abs(totalDuration - 10)).toBeLessThan(0.1);
     } finally {
       ctx.close();
     }
@@ -99,12 +118,11 @@ describe('Mp4Plugin.decode (MP4 - video+audio)', () => {
     const ctx = new AudioContext();
     try {
       const info = await mp4Plugin.getInfo(MP4_URL);
-      if (info.duration) {
-        const start = Math.max(0, info.duration - 5);
-        const buffer = await audioSnip.decodeAudioDataSegment(ctx, MP4_URL, start, info.duration);
-        expect(buffer).toBeInstanceOf(AudioBuffer);
-        expect(buffer.duration).toBeGreaterThan(0);
-      }
+      expect(info.duration).not.toBeNull();
+      const start = Math.max(0, info.duration! - 5);
+      const buffer = await audioSnip.decodeAudioDataSegment(ctx, MP4_URL, start, info.duration!);
+      expect(buffer).toBeInstanceOf(AudioBuffer);
+      expect(buffer.duration).toBeGreaterThan(0);
     } finally {
       ctx.close();
     }
