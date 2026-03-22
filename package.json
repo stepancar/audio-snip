@@ -1,23 +1,31 @@
 {
   "name": "audio-snip",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "description": "Decode audio segments from remote files via HTTP Range requests",
+  "license": "MIT",
+  "author": "Stepan Mikhailiuk",
+  "repository": "stepancar/audio-snip",
   "type": "module",
+  "files": ["dist", "LICENSE", "README.md"],
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": { "types": "./dist/types/index.d.ts", "default": "./dist/esm/index.js" },
+      "require": { "types": "./dist/types/index.d.ts", "default": "./dist/cjs/index.js" }
     },
     "./mp3": {
-      "import": "./dist/plugins/mp3.js",
-      "types": "./dist/plugins/mp3.d.ts"
+      "import": { "types": "./dist/types/plugins/mp3.d.ts", "default": "./dist/esm/plugins/mp3.js" },
+      "require": { "types": "./dist/types/plugins/mp3.d.ts", "default": "./dist/cjs/plugins/mp3.js" }
     },
     "./mp4": {
-      "import": "./dist/plugins/mp4.js",
-      "types": "./dist/plugins/mp4.d.ts"
+      "import": { "types": "./dist/types/plugins/mp4.d.ts", "default": "./dist/esm/plugins/mp4.js" },
+      "require": { "types": "./dist/types/plugins/mp4.d.ts", "default": "./dist/cjs/plugins/mp4.js" }
     }
   },
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/types/index.d.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.esm.json && tsc -p tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
     "build:demo": "vite build --config demo/vite.config.ts",
     "test": "vitest run",
     "test:watch": "vitest"
