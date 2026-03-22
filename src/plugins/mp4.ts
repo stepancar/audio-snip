@@ -51,16 +51,34 @@ interface MP4Info {
   timescale: number;
 }
 
+interface MP4SampleInfo {
+  number: number;
+  offset: number;
+  size: number;
+  duration: number;
+  cts: number;
+  dts: number;
+  is_sync: boolean;
+  track_id: number;
+  timescale: number;
+  description: MP4Sample['description'];
+  alreadyRead: number;
+}
+
 interface MP4BoxFile {
   onReady: ((info: MP4Info) => void) | null;
   onError: ((e: Error) => void) | null;
   onSamples: ((id: number, user: unknown, samples: MP4Sample[]) => void) | null;
-  appendBuffer(data: ArrayBuffer & { fileStart?: number }): void;
+  appendBuffer(data: ArrayBuffer & { fileStart?: number }): number;
   flush(): void;
-  setExtractionOptions(trackId: number, user?: unknown, options?: { nbSamples?: number }): void;
+  setExtractionOptions(trackId: number, user?: unknown, options?: { nbSamples?: number; rapAlignement?: boolean }): void;
+  unsetExtractionOptions(trackId: number): void;
   start(): void;
+  stop(): void;
   seek(time: number, useRap?: boolean): { offset: number; time: number };
   getTrackById(trackId: number): MP4Track;
+  getTrackSamplesInfo(trackId: number): MP4SampleInfo[];
+  releaseUsedSamples(trackId: number, sampleNum: number): void;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -152,78 +170,65 @@ export class Mp4Plugin extends BasePlugin {
     startTime: number,
     endTime: number,
   ): Promise<AudioBuffer> {
-    const MP4Box = MP4BoxLib;
-    const fileSize = await fetchContentLength(url);
-
-    // We need to stream data into MP4Box to get info + samples
-    const mp4 = MP4Box.createFile();
-
-    const info = await new Promise<MP4Info>((resolve, reject) => {
-      mp4.onReady = resolve;
-      mp4.onError = reject;
-
-      // We'll feed data in chunks
-      this.streamToMP4Box(mp4, url, fileSize).catch(reject);
-    });
-
-    const audioTrack = info.tracks.find((t) => t.type === 'audio');
-    if (!audioTrack) throw new Error('No audio track found in MP4');
+    // Step 1: Load moov atom only (a few MB) to get metadata + sample table
+    const { audioTrack, mp4 } = await this.loadMoovForDecode(url);
 
     const sampleRate = audioTrack.audio!.sample_rate;
     const timescale = audioTrack.timescale;
 
-    // Collect samples in the time range
-    const samples = await new Promise<MP4Sample[]>((resolve, _reject) => {
-      const collected: MP4Sample[] = [];
-      mp4.onSamples = (_id, _user, samps) => {
-        collected.push(...samps);
-      };
-      mp4.setExtractionOptions(audioTrack.id, null, { nbSamples: audioTrack.nb_samples });
-      mp4.start();
-      mp4.flush();
-
-      // Give mp4box a moment to process
-      setTimeout(() => resolve(collected), 100);
-    });
-
-    if (samples.length === 0) {
-      throw new Error('No audio samples extracted from MP4');
+    // Step 2: Use sample table to find which samples fall in [startTime, endTime]
+    const allSamples = mp4.getTrackSamplesInfo(audioTrack.id);
+    if (allSamples.length === 0) {
+      throw new Error('No audio samples in track');
     }
 
-    // Map startTime/endTime to sample indices
-    const startTimescale = startTime * timescale;
-    const endTimescale = endTime * timescale;
+    const startTS = startTime * timescale;
+    const endTS = endTime * timescale;
 
-    // Find first and last sample within range
-    // Add some extra samples before for decoder priming
     let firstIdx = 0;
-    let lastIdx = samples.length - 1;
+    let lastIdx = allSamples.length - 1;
 
-    for (let i = 0; i < samples.length; i++) {
-      if (samples[i].cts + samples[i].duration > startTimescale) {
-        firstIdx = Math.max(0, i - 1); // one extra for priming
+    for (let i = 0; i < allSamples.length; i++) {
+      if (allSamples[i].cts + allSamples[i].duration > startTS) {
+        firstIdx = Math.max(0, i - 1); // one extra for decoder priming
         break;
       }
     }
-    for (let i = samples.length - 1; i >= 0; i--) {
-      if (samples[i].cts < endTimescale) {
-        lastIdx = Math.min(samples.length - 1, i + 1); // one extra at end
+    for (let i = allSamples.length - 1; i >= 0; i--) {
+      if (allSamples[i].cts < endTS) {
+        lastIdx = Math.min(allSamples.length - 1, i + 1); // one extra at end
         break;
       }
     }
 
-    // Get decoder config from first sample description
-    const firstSample = samples[0];
-    const aacConfig = firstSample.description?.aacDecoderConfigDescriptor;
-    const audioObjectType = aacConfig?.audioObjectType ?? 2; // AAC-LC
+    const neededSamples = allSamples.slice(firstIdx, lastIdx + 1);
+
+    // Step 3: Compute minimal byte ranges from sample offsets
+    // Collapse contiguous/overlapping samples into merged ranges
+    const ranges = this.collapseRanges(neededSamples);
+
+    // Step 4: Fetch only the byte ranges containing needed samples
+    // We read sample data directly from the fetched bytes — no onSamples needed.
+    const rangeData = new Map<number, Uint8Array>(); // range.start → data
+    for (const range of ranges) {
+      const data = await fetchRange(url, range.start, range.end);
+      rangeData.set(range.start, data);
+    }
+
+    // Step 5: Extract raw AAC frame data for each needed sample
+    // by reading directly from fetched ranges using sample offset/size
+    const firstSampleInfo = neededSamples[0];
+    const aacConfig = firstSampleInfo.description?.aacDecoderConfigDescriptor;
+    const audioObjectType = aacConfig?.audioObjectType ?? 2;
     const samplingFreqIndex = aacConfig?.samplingFrequencyIndex ?? getSamplingFrequencyIndex(sampleRate);
     const channelConfig = aacConfig?.channelConfiguration ?? audioTrack.audio!.channel_count;
 
-    // Build ADTS stream from samples
     const adtsChunks: Uint8Array[] = [];
-    for (let i = firstIdx; i <= lastIdx; i++) {
-      const sample = samples[i];
-      const rawData = new Uint8Array(sample.data);
+    for (const si of neededSamples) {
+      // Find which fetched range contains this sample
+      const rawData = this.readSampleFromRanges(si.offset, si.size, ranges, rangeData);
+      if (!rawData) continue; // skip if data not available (shouldn't happen)
+
       const adtsHeader = makeAdtsHeader(
         rawData.length,
         audioObjectType,
@@ -236,7 +241,10 @@ export class Mp4Plugin extends BasePlugin {
       adtsChunks.push(frame);
     }
 
-    // Concatenate all ADTS frames
+    if (adtsChunks.length === 0) {
+      throw new Error('No audio samples could be read from fetched ranges');
+    }
+
     const totalLen = adtsChunks.reduce((acc, c) => acc + c.length, 0);
     const adtsStream = new Uint8Array(totalLen);
     let offset = 0;
@@ -245,15 +253,14 @@ export class Mp4Plugin extends BasePlugin {
       offset += chunk.length;
     }
 
-    // Decode
-    const decoded = await ctx.decodeAudioData(adtsStream.buffer.slice(0));
+    // Step 6: Decode and trim
+    const decoded = await ctx.decodeAudioData(adtsStream.buffer.slice(0) as ArrayBuffer);
 
-    // Calculate trim in samples
-    // The first sample in our extracted range starts at samples[firstIdx].cts
-    const rangeStartTime = samples[firstIdx].cts / timescale;
+    const decodedRate = decoded.sampleRate;
+    const rangeStartTime = neededSamples[0].cts / timescale;
     const trimStartSeconds = startTime - rangeStartTime;
-    const trimStartSamples = Math.round(trimStartSeconds * sampleRate);
-    const wantedSamples = Math.round((endTime - startTime) * sampleRate);
+    const trimStartSamples = Math.round(trimStartSeconds * decodedRate);
+    const wantedSamples = Math.round((endTime - startTime) * decodedRate);
 
     const startSample = Math.max(0, trimStartSamples);
     const endSample = Math.min(decoded.length, startSample + wantedSamples);
@@ -261,9 +268,62 @@ export class Mp4Plugin extends BasePlugin {
     return trimBySamples(ctx, decoded, startSample, endSample);
   }
 
+  /**
+   * Read sample data from pre-fetched byte ranges.
+   */
+  private readSampleFromRanges(
+    sampleOffset: number,
+    sampleSize: number,
+    ranges: { start: number; end: number }[],
+    rangeData: Map<number, Uint8Array>,
+  ): Uint8Array | null {
+    for (const range of ranges) {
+      if (sampleOffset >= range.start && sampleOffset + sampleSize - 1 <= range.end) {
+        const data = rangeData.get(range.start);
+        if (!data) return null;
+        const localOffset = sampleOffset - range.start;
+        return data.subarray(localOffset, localOffset + sampleSize);
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Collapse sample byte ranges into minimal contiguous fetch ranges.
+   * Adjacent or overlapping ranges are merged to reduce HTTP requests.
+   */
+  private collapseRanges(
+    samples: MP4SampleInfo[],
+  ): { start: number; end: number }[] {
+    if (samples.length === 0) return [];
+
+    const sorted = [...samples].sort((a, b) => a.offset - b.offset);
+    const ranges: { start: number; end: number }[] = [];
+    let cur = { start: sorted[0].offset, end: sorted[0].offset + sorted[0].size - 1 };
+
+    for (let i = 1; i < sorted.length; i++) {
+      const sampleStart = sorted[i].offset;
+      const sampleEnd = sampleStart + sorted[i].size - 1;
+      // Merge if gap is < 64KB (cheaper to over-fetch than make another request)
+      if (sampleStart <= cur.end + 65536) {
+        cur.end = Math.max(cur.end, sampleEnd);
+      } else {
+        ranges.push(cur);
+        cur = { start: sampleStart, end: sampleEnd };
+      }
+    }
+    ranges.push(cur);
+    return ranges;
+  }
+
   // ─── Internal helpers ────────────────────────────────────────────────────
 
   private async loadMoov(url: string): Promise<{ info: MP4Info; audioTrack: MP4Track }> {
+    const { info, audioTrack } = await this.loadMoovForDecode(url);
+    return { info, audioTrack };
+  }
+
+  private async loadMoovForDecode(url: string): Promise<{ info: MP4Info; audioTrack: MP4Track; mp4: MP4BoxFile }> {
     const MP4Box = MP4BoxLib;
     const mp4 = MP4Box.createFile();
     const fileSize = await fetchContentLength(url);
@@ -277,7 +337,7 @@ export class Mp4Plugin extends BasePlugin {
     const audioTrack = info.tracks.find((t) => t.type === 'audio');
     if (!audioTrack) throw new Error('No audio track found in MP4');
 
-    return { info, audioTrack };
+    return { info, audioTrack, mp4 };
   }
 
   private async streamToMP4Box(
@@ -323,4 +383,5 @@ export class Mp4Plugin extends BasePlugin {
 
     mp4.flush();
   }
+
 }
