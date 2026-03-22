@@ -1,9 +1,9 @@
 {
   "name": "audio-snip",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Decode audio segments from remote files via HTTP Range requests",
   "license": "MIT",
-  "author": "Stepan Mikhailiuk",
+  "author": "Stepan Mikhailiuk (stepancar)",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/stepancar/audio-snip.git"

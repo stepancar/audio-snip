@@ -347,15 +347,21 @@ export class Mp4Plugin extends BasePlugin {
     const mp4 = MP4Box.createFile();
     const fileSize = await file.fetchSize();
 
+    let timer: ReturnType<typeof setTimeout>;
     const infoPromise = new Promise<MP4Info>((resolve, reject) => {
       mp4.onReady = resolve;
       mp4.onError = reject;
       this.streamToMP4Box(mp4, file, fileSize).catch(reject);
     });
-    const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Timeout: could not parse MP4 metadata')), MOOV_TIMEOUT_MS)
-    );
-    const info = await Promise.race([infoPromise, timeout]);
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Timeout: could not parse MP4 metadata')), MOOV_TIMEOUT_MS);
+    });
+    let info: MP4Info;
+    try {
+      info = await Promise.race([infoPromise, timeout]);
+    } finally {
+      clearTimeout(timer!);
+    }
 
     const audioTrack = info.tracks.find((t) => t.type === 'audio');
     if (!audioTrack) throw new Error('No audio track found in MP4');
@@ -370,11 +376,19 @@ export class Mp4Plugin extends BasePlugin {
   ): Promise<void> {
     const chunkSize = 256 * 1024;
     if (!fileSize) throw new Error('Cannot determine file size — needed for MP4 parsing');
-    const totalSize = fileSize;
-    let offset = 0;
 
-    while (offset < totalSize) {
-      const end = Math.min(offset + chunkSize - 1, totalSize - 1);
+    // mp4box calls onReady when moov is parsed. We track that to stop early.
+    let moovFound = false;
+    const origOnReady = mp4.onReady;
+    mp4.onReady = (info) => {
+      moovFound = true;
+      origOnReady?.(info);
+    };
+
+    // Stream from start until moov is found or we hit MOOV_INITIAL_BYTES
+    let offset = 0;
+    while (offset < fileSize && !moovFound) {
+      const end = Math.min(offset + chunkSize - 1, fileSize - 1);
       const data = await file.getRange(offset, end);
       const ab = data.buffer.slice(
         data.byteOffset,
@@ -382,27 +396,30 @@ export class Mp4Plugin extends BasePlugin {
       ) as ArrayBuffer & { fileStart?: number };
       ab.fileStart = offset;
       mp4.appendBuffer(ab);
-
       offset = end + 1;
 
-      // Check if we have enough info - mp4box will call onReady
-      // For large files, we may need to stop early once we have what we need
-      if (offset > MOOV_INITIAL_BYTES && offset < totalSize - chunkSize) {
-        // For the moov-at-end case, try the tail
+      // After reading MOOV_INITIAL_BYTES from start without finding moov,
+      // jump to the tail (moov-at-end layout)
+      if (!moovFound && offset >= MOOV_INITIAL_BYTES && offset < fileSize - chunkSize) {
         break;
       }
     }
 
-    // If moov is at the end, fetch the tail
-    if (fileSize && offset < fileSize) {
+    // If moov wasn't in the head, try the tail
+    if (!moovFound && offset < fileSize) {
       const tailStart = Math.max(offset, fileSize - MOOV_INITIAL_BYTES);
-      const tailData = await file.getRange(tailStart, fileSize - 1);
-      const ab = tailData.buffer.slice(
-        tailData.byteOffset,
-        tailData.byteOffset + tailData.byteLength,
-      ) as ArrayBuffer & { fileStart?: number };
-      ab.fileStart = tailStart;
-      mp4.appendBuffer(ab);
+      let tailOffset = tailStart;
+      while (tailOffset < fileSize && !moovFound) {
+        const end = Math.min(tailOffset + chunkSize - 1, fileSize - 1);
+        const data = await file.getRange(tailOffset, end);
+        const ab = data.buffer.slice(
+          data.byteOffset,
+          data.byteOffset + data.byteLength,
+        ) as ArrayBuffer & { fileStart?: number };
+        ab.fileStart = tailOffset;
+        mp4.appendBuffer(ab);
+        tailOffset = end + 1;
+      }
     }
 
     mp4.flush();
