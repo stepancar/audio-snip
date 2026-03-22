@@ -1,0 +1,35 @@
+{
+  "name": "audio-snip",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./mp3": {
+      "import": "./dist/plugins/mp3.js",
+      "types": "./dist/plugins/mp3.d.ts"
+    },
+    "./mp4": {
+      "import": "./dist/plugins/mp4.js",
+      "types": "./dist/plugins/mp4.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:demo": "vite build --config demo/vite.config.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "mp4box": "^0.5.2"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vitest": "^2",
+    "@vitest/browser": "^2",
+    "playwright": "^1",
+    "vite": "^5"
+  }
+}

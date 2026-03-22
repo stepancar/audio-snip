@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>audio-snip demo</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; color: #333; }
+    h1 { margin-bottom: 0.25rem; }
+    .subtitle { color: #666; font-size: 0.9rem; margin-bottom: 1rem; }
+    label { display: block; margin-top: 1rem; font-weight: 600; }
+    input[type="text"] { width: 100%; padding: 0.5rem; font-size: 0.9rem; border: 1px solid #ccc; border-radius: 4px; margin-top: 0.25rem; }
+    .range-row { display: flex; gap: 1rem; align-items: center; margin-top: 0.5rem; }
+    .range-row input[type="range"] { flex: 1; }
+    .range-row span { min-width: 4rem; text-align: right; font-variant-numeric: tabular-nums; }
+    button { margin-top: 1rem; padding: 0.5rem 1.5rem; font-size: 1rem; cursor: pointer; border: none; border-radius: 4px; background: #2563eb; color: #fff; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    button:hover:not(:disabled) { background: #1d4ed8; }
+    canvas { width: 100%; height: 120px; margin-top: 1rem; border: 1px solid #ddd; border-radius: 4px; }
+    #status { margin-top: 0.5rem; font-size: 0.85rem; color: #666; min-height: 1.2em; }
+    .btn-row { display: flex; gap: 0.5rem; }
+
+    /* ── Network panel ── */
+    #network-panel { margin-top: 1.5rem; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
+    #network-panel summary { padding: 0.75rem 1rem; background: #f9fafb; cursor: pointer; font-weight: 600; font-size: 0.95rem; }
+    #network-panel summary:hover { background: #f3f4f6; }
+    #network-summary { font-weight: 400; color: #666; margin-left: 0.5rem; }
+    #network-log { max-height: 280px; overflow-y: auto; font-size: 0.8rem; font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; }
+    .net-row { display: grid; grid-template-columns: 2fr 1.2fr 0.8fr 0.8fr 0.6fr; padding: 0.35rem 1rem; border-top: 1px solid #f0f0f0; align-items: center; }
+    .net-row:hover { background: #f9fafb; }
+    .net-header { font-weight: 600; background: #f3f4f6; border-top: none; color: #555; position: sticky; top: 0; }
+    .badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; font-weight: 600; }
+    .badge-206 { background: #dcfce7; color: #166534; }
+    .badge-200 { background: #fef3c7; color: #92400e; }
+    .sw-status { padding: 0.5rem 1rem; font-size: 0.8rem; color: #888; border-top: 1px solid #f0f0f0; }
+
+    /* ── Transfer bar ── */
+    #transfer-bar { margin-top: 1rem; padding: 0.75rem 1rem; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; }
+    .transfer-visual { display: flex; align-items: center; gap: 0.75rem; margin-top: 0.5rem; }
+    .transfer-track { flex: 1; height: 24px; background: #e5e7eb; border-radius: 4px; overflow: hidden; position: relative; }
+    .transfer-fill { height: 100%; background: linear-gradient(90deg, #22c55e, #16a34a); border-radius: 4px; transition: width 0.3s ease; min-width: 2px; }
+    .transfer-label { font-size: 0.85rem; font-variant-numeric: tabular-nums; min-width: 6rem; }
+    .transfer-title { font-weight: 600; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>audio-snip</h1>
+  <p class="subtitle">Decode audio segments via HTTP Range requests — without downloading the full file.</p>
+
+  <label>Audio URL
+    <input id="url" type="text" value="fixtures/test-cbr.mp3" />
+  </label>
+
+  <label>Start time (s)</label>
+  <div class="range-row">
+    <input id="start" type="range" min="0" max="660" step="0.1" value="10" />
+    <span id="startVal">10.0</span>
+  </div>
+
+  <label>End time (s)</label>
+  <div class="range-row">
+    <input id="end" type="range" min="0" max="660" step="0.1" value="30" />
+    <span id="endVal">30.0</span>
+  </div>
+
+  <div class="btn-row">
+    <button id="load">Load segment</button>
+    <button id="play" disabled>Play</button>
+    <button id="stop" disabled>Stop</button>
+  </div>
+  <div id="status"></div>
+
+  <canvas id="waveform"></canvas>
+
+  <!-- Transfer summary -->
+  <div id="transfer-bar" hidden>
+    <div class="transfer-title">Data transferred</div>
+    <div class="transfer-visual">
+      <div class="transfer-track">
+        <div class="transfer-fill" id="transfer-fill" style="width: 0%"></div>
+      </div>
+      <span class="transfer-label" id="transfer-label">0 KB / 0 MB</span>
+    </div>
+  </div>
+
+  <!-- Network log panel -->
+  <details id="network-panel" open>
+    <summary>
+      Range requests
+      <span id="network-summary">waiting for Service Worker...</span>
+    </summary>
+    <div id="network-log">
+      <div class="net-row net-header">
+        <span>File</span>
+        <span>Range</span>
+        <span>Received</span>
+        <span>Total</span>
+        <span>Status</span>
+      </div>
+    </div>
+    <div class="sw-status" id="sw-status">Registering Service Worker...</div>
+  </details>
+
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>
