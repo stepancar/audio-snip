@@ -21,6 +21,14 @@
     #status { margin-top: 0.5rem; font-size: 0.85rem; color: #666; min-height: 1.2em; }
     .btn-row { display: flex; gap: 0.5rem; }
 
+    /* ── File list ── */
+    .file-list { display: flex; gap: 0.5rem; margin-top: 0.5rem; flex-wrap: wrap; }
+    .file-btn { display: flex; flex-direction: column; align-items: flex-start; padding: 0.5rem 0.75rem; border: 2px solid #e5e7eb; border-radius: 6px; background: #fff; cursor: pointer; transition: border-color 0.15s, background 0.15s; min-width: 160px; margin-top: 0; }
+    .file-btn:hover { border-color: #93c5fd; background: #eff6ff; }
+    .file-btn.selected { border-color: #2563eb; background: #eff6ff; }
+    .file-name { font-weight: 600; font-size: 0.9rem; color: #333; }
+    .file-meta { font-size: 0.75rem; color: #888; margin-top: 0.15rem; }
+
     /* ── Network panel ── */
     #network-panel { margin-top: 1.5rem; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
     #network-panel summary { padding: 0.75rem 1rem; background: #f9fafb; cursor: pointer; font-weight: 600; font-size: 0.95rem; }
@@ -48,7 +56,23 @@
   <h1>audio-snip</h1>
   <p class="subtitle">Decode audio segments via HTTP Range requests — without downloading the full file.</p>
 
-  <label>Audio URL
+  <label>Test files</label>
+  <div class="file-list" id="file-list">
+    <button class="file-btn selected" data-url="fixtures/test-cbr.mp3" data-duration="660">
+      <span class="file-name">test-cbr.mp3</span>
+      <span class="file-meta">MP3 CBR 128kbps &middot; 11 min &middot; 10 MB</span>
+    </button>
+    <button class="file-btn" data-url="fixtures/test-vbr.mp3" data-duration="60">
+      <span class="file-name">test-vbr.mp3</span>
+      <span class="file-meta">MP3 VBR &middot; 1 min &middot; 374 KB</span>
+    </button>
+    <button class="file-btn" data-url="fixtures/test.m4a" data-duration="3300">
+      <span class="file-name">test.m4a</span>
+      <span class="file-meta">AAC 128kbps &middot; 55 min &middot; 51 MB</span>
+    </button>
+  </div>
+
+  <label>Or enter URL
     <input id="url" type="text" value="fixtures/test-cbr.mp3" />
   </label>
 

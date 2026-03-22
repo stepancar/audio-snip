@@ -148,6 +148,37 @@ function resetNetworkLog(): void {
   transferBar.hidden = true;
 }
 
+// ─── File list ───────────────────────────────────────────────────────────────
+
+const fileList = document.getElementById('file-list')!;
+
+fileList.addEventListener('click', (e) => {
+  const btn = (e.target as HTMLElement).closest('.file-btn') as HTMLElement | null;
+  if (!btn) return;
+
+  // Update selection
+  fileList.querySelectorAll('.file-btn').forEach((b) => b.classList.remove('selected'));
+  btn.classList.add('selected');
+
+  // Update URL input
+  urlInput.value = btn.dataset.url || '';
+
+  // Update slider max to match file duration
+  const dur = btn.dataset.duration || '660';
+  startSlider.max = dur;
+  endSlider.max = dur;
+
+  // Reset end slider to a reasonable default (30s or file duration, whichever is less)
+  const maxEnd = Math.min(30, parseFloat(dur));
+  endSlider.value = String(maxEnd);
+  endVal.textContent = maxEnd.toFixed(1);
+
+  // Reset start to 10 or 0
+  const startDefault = Math.min(10, parseFloat(dur) - maxEnd);
+  startSlider.value = String(Math.max(0, startDefault));
+  startVal.textContent = Math.max(0, startDefault).toFixed(1);
+});
+
 // ─── Sliders ─────────────────────────────────────────────────────────────────
 
 startSlider.addEventListener('input', () => {
