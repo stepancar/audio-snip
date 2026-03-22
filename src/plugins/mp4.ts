@@ -87,10 +87,14 @@ interface MP4BoxFile {
   releaseUsedSamples(trackId: number, sampleNum: number): void;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 import MP4BoxFactory from 'mp4box';
 
-const MP4BoxLib = MP4BoxFactory as unknown as { createFile(): MP4BoxFile };
+const MP4Box = MP4BoxFactory as unknown as { createFile(): MP4BoxFile };
+
+const AAC_LC_PRIMING_SAMPLES = 2112;
+const MOOV_TIMEOUT_MS = 30000;
+const MOOV_INITIAL_BYTES = 2 * 1024 * 1024;
+const RANGE_MERGE_GAP = 64 * 1024;
 
 // ─── ADTS header construction ────────────────────────────────────────────────
 
@@ -147,7 +151,7 @@ export class Mp4Plugin extends BasePlugin {
 
   async getInfo(url: string): Promise<AudioFileInfo> {
     const file = new RemoteFile(url);
-    const { info, audioTrack } = await this.loadMoov(file);
+    const { info, audioTrack } = await this.loadMoovForDecode(file);
     const duration = info.duration / info.timescale;
 
     // Parse encoder delay from edit list (elst atom)
@@ -158,7 +162,7 @@ export class Mp4Plugin extends BasePlugin {
       encoderDelay = Math.round(mediaTime * audioTrack.audio!.sample_rate / audioTrack.timescale);
     } else {
       // Default priming for AAC-LC: 1024 * 2 + 64 = 2112
-      encoderDelay = 2112;
+      encoderDelay = AAC_LC_PRIMING_SAMPLES;
     }
 
     return {
@@ -192,7 +196,7 @@ export class Mp4Plugin extends BasePlugin {
       const mediaTime = edits[0].media_time;
       encoderDelay = Math.round(mediaTime * sampleRate / timescale);
     } else {
-      encoderDelay = 2112; // Default AAC-LC priming
+      encoderDelay = AAC_LC_PRIMING_SAMPLES; // Default AAC-LC priming
     }
 
     // Step 2: Use sample table to find which samples fall in [startTime, endTime]
@@ -275,7 +279,7 @@ export class Mp4Plugin extends BasePlugin {
     }
 
     // Step 6: Decode and trim
-    const decoded = await ctx.decodeAudioData(adtsStream.buffer.slice(0) as ArrayBuffer);
+    const decoded = await ctx.decodeAudioData(adtsStream.buffer.slice(0));
 
     const decodedRate = decoded.sampleRate;
     const rangeStartTime = neededSamples[0].cts / timescale;
@@ -326,7 +330,7 @@ export class Mp4Plugin extends BasePlugin {
       const sampleStart = sorted[i].offset;
       const sampleEnd = sampleStart + sorted[i].size - 1;
       // Merge if gap is < 64KB (cheaper to over-fetch than make another request)
-      if (sampleStart <= cur.end + 65536) {
+      if (sampleStart <= cur.end + RANGE_MERGE_GAP) {
         cur.end = Math.max(cur.end, sampleEnd);
       } else {
         ranges.push(cur);
@@ -339,13 +343,7 @@ export class Mp4Plugin extends BasePlugin {
 
   // ─── Internal helpers ────────────────────────────────────────────────────
 
-  private async loadMoov(file: RemoteFile): Promise<{ info: MP4Info; audioTrack: MP4Track }> {
-    const { info, audioTrack } = await this.loadMoovForDecode(file);
-    return { info, audioTrack };
-  }
-
   private async loadMoovForDecode(file: RemoteFile): Promise<{ info: MP4Info; audioTrack: MP4Track; mp4: MP4BoxFile }> {
-    const MP4Box = MP4BoxLib;
     const mp4 = MP4Box.createFile();
     const fileSize = await file.fetchSize();
 
@@ -355,7 +353,7 @@ export class Mp4Plugin extends BasePlugin {
       this.streamToMP4Box(mp4, file, fileSize).catch(reject);
     });
     const timeout = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('Timeout: could not parse MP4 metadata within 30s')), 30000)
+      setTimeout(() => reject(new Error('Timeout: could not parse MP4 metadata')), MOOV_TIMEOUT_MS)
     );
     const info = await Promise.race([infoPromise, timeout]);
 
@@ -371,7 +369,8 @@ export class Mp4Plugin extends BasePlugin {
     fileSize: number | null,
   ): Promise<void> {
     const chunkSize = 256 * 1024;
-    const totalSize = fileSize ?? 10 * 1024 * 1024; // fallback 10MB
+    if (!fileSize) throw new Error('Cannot determine file size — needed for MP4 parsing');
+    const totalSize = fileSize;
     let offset = 0;
 
     while (offset < totalSize) {
@@ -388,7 +387,7 @@ export class Mp4Plugin extends BasePlugin {
 
       // Check if we have enough info - mp4box will call onReady
       // For large files, we may need to stop early once we have what we need
-      if (offset > 2 * 1024 * 1024 && offset < totalSize - chunkSize) {
+      if (offset > MOOV_INITIAL_BYTES && offset < totalSize - chunkSize) {
         // For the moov-at-end case, try the tail
         break;
       }
@@ -396,7 +395,7 @@ export class Mp4Plugin extends BasePlugin {
 
     // If moov is at the end, fetch the tail
     if (fileSize && offset < fileSize) {
-      const tailStart = Math.max(offset, fileSize - 2 * 1024 * 1024);
+      const tailStart = Math.max(offset, fileSize - MOOV_INITIAL_BYTES);
       const tailData = await file.getRange(tailStart, fileSize - 1);
       const ab = tailData.buffer.slice(
         tailData.byteOffset,

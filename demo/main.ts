@@ -228,7 +228,8 @@ async function registerSW(): Promise<void> {
     return;
   }
   try {
-    const base = (import.meta as unknown as { env: { BASE_URL: string } }).env.BASE_URL || '/';
+    // @ts-ignore Vite injects BASE_URL at build time
+    const base: string = import.meta.env?.BASE_URL || '/';
     const reg = await navigator.serviceWorker.register(base + 'sw.js', { scope: base });
 
     if (reg.active) {

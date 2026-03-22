@@ -45,31 +45,23 @@ export async function fetchRange(
 export async function fetchContentLength(
   url: string,
 ): Promise<number | null> {
-  // Try HEAD first
   const headResp = await fetch(url, { method: 'HEAD' });
   const cl = headResp.headers.get('content-length');
   if (cl) return parseInt(cl, 10);
-  // Fallback: GET with Range 0-0 and parse Content-Range
+
+  // Fallback: Range 0-0, parse Content-Range or Content-Length
   const rangeResp = await fetch(url, {
     headers: { Range: 'bytes=0-0' },
   });
   const cr = rangeResp.headers.get('content-range');
+  const cl2 = rangeResp.headers.get('content-length');
+  await rangeResp.arrayBuffer(); // consume body
+
   if (cr) {
     const match = cr.match(/\/(\d+)/);
-    if (match) {
-      await rangeResp.arrayBuffer(); // consume body
-      return parseInt(match[1], 10);
-    }
+    if (match) return parseInt(match[1], 10);
   }
-  // If no Content-Range, check Content-Length from the response itself
-  if (!cr) {
-    const cl2 = rangeResp.headers.get('content-length');
-    if (cl2) {
-      await rangeResp.arrayBuffer(); // consume body
-      return parseInt(cl2, 10);
-    }
-  }
-  await rangeResp.arrayBuffer(); // consume body
+  if (cl2) return parseInt(cl2, 10);
   return null;
 }
 

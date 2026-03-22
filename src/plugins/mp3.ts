@@ -91,11 +91,7 @@ function parseFrameHeader(data: Uint8Array, offset: number): FrameHeader | null 
   if (layer === 1) {
     frameSize = Math.floor((12 * bitrate * 1000) / sampleRate + (padding ? 1 : 0)) * 4;
   } else {
-    const slotSize = 1;
-    const divisor = mpegVersion === 1 ? sampleRate : sampleRate * 2;
-    frameSize = Math.floor((samplesPerFrame * bitrate * 1000) / (8 * divisor)) * 8 / 8 + (padding ? slotSize : 0);
-    // Simplified: frameSize = floor(samplesPerFrame/8 * bitrate*1000 / sampleRate) + padding
-    frameSize = Math.floor((samplesPerFrame * (bitrate * 1000) / 8) / sampleRate) + (padding ? slotSize : 0);
+    frameSize = Math.floor((samplesPerFrame * (bitrate * 1000) / 8) / sampleRate) + (padding ? 1 : 0);
   }
 
   // Side information size for Layer 3
@@ -213,12 +209,11 @@ function parseXingVbri(
       pos += 4;
     }
 
-    // LAME gapless info at xingOffset + 141 (relative to Xing tag start)
-    // The LAME header starts 120 bytes after the Xing tag position
+    // LAME tag: encoder string at Xing+120, delay/padding at Xing+141
     let encoderDelay = 0;
     let encoderPadding = 0;
 
-    const lameOffset = xingOffset + 120 + 21; // LAME encoder delays are at Xing+141
+    const lameOffset = xingOffset + 141;
     if (lameOffset + 3 <= data.length) {
       // Verify LAME tag exists (9 char encoder string at xingOffset+120)
       const lameTag = String.fromCharCode(
@@ -362,10 +357,7 @@ export class Mp3Plugin extends BasePlugin {
       startByte = xingFrameStart + tocInterpolate(vbrInfo.toc, startFrac, vbrInfo.totalBytes);
       endByte = xingFrameStart + tocInterpolate(vbrInfo.toc, endFrac, vbrInfo.totalBytes);
     } else {
-      // CBR or VBR-without-TOC fallback: linear byte estimate
-      if (isVbr && (!vbrInfo?.toc)) {
-        console.warn('audio-snip: VBR file without TOC, using CBR byte estimate for Range request');
-      }
+      // CBR or VBR-without-TOC: linear byte estimate
       const bytesPerSecond = (header.bitrate * 1000) / 8;
       startByte = audioStart + Math.floor(startTime * bytesPerSecond);
       endByte = audioStart + Math.ceil(endTime * bytesPerSecond);
@@ -435,27 +427,23 @@ export class Mp3Plugin extends BasePlugin {
     vbrInfo: VbrInfo | null;
     audioStart: number;
     xingFrameStart: number;
-    firstFrameOffset: number;
     fileSize: number | null;
   }> {
     const fileSize = await file.fetchSize();
 
-    // First pass: fetch initial chunk
     let headData = await file.getRange(0, HEAD_SIZE - 1);
 
-    // Check for ID3v2 tag
+    // Skip ID3v2 tag
     let audioStart = 0;
     const id3Size = id3v2Size(headData);
     if (id3Size > 0) {
       audioStart = id3Size;
-      // If ID3 tag is larger than our initial fetch, re-fetch from after it
       if (id3Size >= HEAD_SIZE) {
         headData = await file.getRange(id3Size, id3Size + HEAD_SIZE - 1);
-        audioStart = id3Size;
       }
     }
 
-    // Find first frame sync
+    // Find first frame sync (search from 0 if we re-fetched past ID3, else from audioStart)
     const searchStart = id3Size >= HEAD_SIZE ? 0 : audioStart;
     const syncOffset = findFrameSync(headData, searchStart);
     if (syncOffset === -1) {
@@ -465,20 +453,18 @@ export class Mp3Plugin extends BasePlugin {
     const header = parseFrameHeader(headData, syncOffset)!;
     const absoluteFrameOffset = id3Size >= HEAD_SIZE ? id3Size + syncOffset : syncOffset;
 
-    // Parse Xing/VBRI
     const vbrInfo = parseXingVbri(headData, syncOffset, header);
 
-    // If there's a Xing/Info frame, the actual audio starts after it
-    const firstFrameOffset = vbrInfo
+    // Audio starts after the Xing/Info frame (if present), or at the first frame
+    const audioDataStart = vbrInfo
       ? absoluteFrameOffset + header.frameSize
       : absoluteFrameOffset;
 
     return {
       header,
       vbrInfo,
-      audioStart: firstFrameOffset,
+      audioStart: audioDataStart,
       xingFrameStart: absoluteFrameOffset,
-      firstFrameOffset,
       fileSize,
     };
   }
