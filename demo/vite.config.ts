@@ -6,6 +6,18 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturesDir = path.resolve(__dirname, '../tests/fixtures');
 
+const MIME: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.mp4': 'video/mp4',
+  '.aac': 'audio/aac',
+};
+
+function mimeFor(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  return MIME[ext] || 'application/octet-stream';
+}
+
 export default defineConfig({
   root: __dirname,
   base: '/audio-snip/',
@@ -35,7 +47,7 @@ export default defineConfig({
                 'Content-Range': `bytes ${start}-${end}/${stat.size}`,
                 'Accept-Ranges': 'bytes',
                 'Content-Length': end - start + 1,
-                'Content-Type': 'audio/mpeg',
+                'Content-Type': mimeFor(filePath),
               });
               fs.createReadStream(filePath, { start, end }).pipe(res);
               return;
@@ -45,7 +57,7 @@ export default defineConfig({
           res.writeHead(200, {
             'Content-Length': stat.size,
             'Accept-Ranges': 'bytes',
-            'Content-Type': 'audio/mpeg',
+            'Content-Type': mimeFor(filePath),
           });
           fs.createReadStream(filePath).pipe(res);
         });
