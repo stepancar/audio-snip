@@ -1,8 +1,7 @@
 import {
   BasePlugin,
   AudioFileInfo,
-  fetchRange,
-  fetchContentLength,
+  RemoteFile,
   trimBySamples,
 } from '../core.js';
 
@@ -317,16 +316,13 @@ export class Mp3Plugin extends BasePlugin {
   }
 
   canHandle(url: string): boolean {
-    try {
-      const path = new URL(url, 'https://dummy').pathname.toLowerCase();
-      return path.endsWith('.mp3');
-    } catch {
-      return url.toLowerCase().endsWith('.mp3');
-    }
+    const path = url.split('?')[0].split('#')[0].toLowerCase();
+    return path.endsWith('.mp3');
   }
 
   async getInfo(url: string): Promise<AudioFileInfo> {
-    const { header, vbrInfo, fileSize, audioStart } = await this.fetchHeader(url);
+    const file = new RemoteFile(url);
+    const { header, vbrInfo, fileSize, audioStart } = await this.fetchHeader(file);
     const duration = this.computeDuration(header, vbrInfo, fileSize, audioStart, vbrInfo?.encoderDelay ?? 0, vbrInfo?.encoderPadding ?? 0);
 
     return {
@@ -346,7 +342,8 @@ export class Mp3Plugin extends BasePlugin {
     startTime: number,
     endTime: number,
   ): Promise<AudioBuffer> {
-    const { header, vbrInfo, audioStart, xingFrameStart, fileSize } = await this.fetchHeader(url);
+    const file = new RemoteFile(url);
+    const { header, vbrInfo, audioStart, xingFrameStart, fileSize } = await this.fetchHeader(file);
 
     const sampleRate = header.sampleRate;
     const encoderDelay = vbrInfo?.encoderDelay ?? 0;
@@ -384,7 +381,7 @@ export class Mp3Plugin extends BasePlugin {
     );
 
     // Fetch the segment
-    const chunk = await fetchRange(url, fetchStart, fetchEnd);
+    const chunk = await file.getRange(fetchStart, fetchEnd);
 
     // Find first valid frame in fetched chunk
     const firstSync = findFrameSync(chunk, 0);
@@ -433,7 +430,7 @@ export class Mp3Plugin extends BasePlugin {
 
   // ─── Internal helpers ────────────────────────────────────────────────────
 
-  private async fetchHeader(url: string): Promise<{
+  private async fetchHeader(file: RemoteFile): Promise<{
     header: FrameHeader;
     vbrInfo: VbrInfo | null;
     audioStart: number;
@@ -441,10 +438,10 @@ export class Mp3Plugin extends BasePlugin {
     firstFrameOffset: number;
     fileSize: number | null;
   }> {
-    const fileSize = await fetchContentLength(url);
+    const fileSize = await file.fetchSize();
 
     // First pass: fetch initial chunk
-    let headData = await fetchRange(url, 0, HEAD_SIZE - 1);
+    let headData = await file.getRange(0, HEAD_SIZE - 1);
 
     // Check for ID3v2 tag
     let audioStart = 0;
@@ -453,7 +450,7 @@ export class Mp3Plugin extends BasePlugin {
       audioStart = id3Size;
       // If ID3 tag is larger than our initial fetch, re-fetch from after it
       if (id3Size >= HEAD_SIZE) {
-        headData = await fetchRange(url, id3Size, id3Size + HEAD_SIZE - 1);
+        headData = await file.getRange(id3Size, id3Size + HEAD_SIZE - 1);
         audioStart = id3Size;
       }
     }

@@ -1,6 +1,7 @@
 export {
   audioSnip,
   BasePlugin,
+  RemoteFile,
   fetchRange,
   fetchContentLength,
   trimBySamples,

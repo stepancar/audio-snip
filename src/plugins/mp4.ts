@@ -1,8 +1,7 @@
 import {
   BasePlugin,
   AudioFileInfo,
-  fetchRange,
-  fetchContentLength,
+  RemoteFile,
   trimBySamples,
 } from '../core.js';
 
@@ -142,22 +141,13 @@ function getSamplingFrequencyIndex(sampleRate: number): number {
 
 export class Mp4Plugin extends BasePlugin {
   canHandle(url: string): boolean {
-    try {
-      const path = new URL(url, 'https://dummy').pathname.toLowerCase();
-      return (
-        path.endsWith('.m4a') ||
-        path.endsWith('.mp4') ||
-        path.endsWith('.aac') ||
-        path.endsWith('.m4b')
-      );
-    } catch {
-      const lower = url.toLowerCase();
-      return lower.endsWith('.m4a') || lower.endsWith('.mp4') || lower.endsWith('.aac') || lower.endsWith('.m4b');
-    }
+    const path = url.split('?')[0].split('#')[0].toLowerCase();
+    return path.endsWith('.m4a') || path.endsWith('.mp4') || path.endsWith('.aac') || path.endsWith('.m4b');
   }
 
   async getInfo(url: string): Promise<AudioFileInfo> {
-    const { info, audioTrack } = await this.loadMoov(url);
+    const file = new RemoteFile(url);
+    const { info, audioTrack } = await this.loadMoov(file);
     const duration = info.duration / info.timescale;
 
     // Parse encoder delay from edit list (elst atom)
@@ -189,7 +179,8 @@ export class Mp4Plugin extends BasePlugin {
     endTime: number,
   ): Promise<AudioBuffer> {
     // Step 1: Load moov atom only (a few MB) to get metadata + sample table
-    const { audioTrack, mp4 } = await this.loadMoovForDecode(url);
+    const file = new RemoteFile(url);
+    const { audioTrack, mp4 } = await this.loadMoovForDecode(file);
 
     const sampleRate = audioTrack.audio!.sample_rate;
     const timescale = audioTrack.timescale;
@@ -239,7 +230,7 @@ export class Mp4Plugin extends BasePlugin {
     // We read sample data directly from the fetched bytes — no onSamples needed.
     const rangeData = new Map<number, Uint8Array>(); // range.start → data
     for (const range of ranges) {
-      const data = await fetchRange(url, range.start, range.end);
+      const data = await file.getRange(range.start, range.end);
       rangeData.set(range.start, data);
     }
 
@@ -348,20 +339,20 @@ export class Mp4Plugin extends BasePlugin {
 
   // ─── Internal helpers ────────────────────────────────────────────────────
 
-  private async loadMoov(url: string): Promise<{ info: MP4Info; audioTrack: MP4Track }> {
-    const { info, audioTrack } = await this.loadMoovForDecode(url);
+  private async loadMoov(file: RemoteFile): Promise<{ info: MP4Info; audioTrack: MP4Track }> {
+    const { info, audioTrack } = await this.loadMoovForDecode(file);
     return { info, audioTrack };
   }
 
-  private async loadMoovForDecode(url: string): Promise<{ info: MP4Info; audioTrack: MP4Track; mp4: MP4BoxFile }> {
+  private async loadMoovForDecode(file: RemoteFile): Promise<{ info: MP4Info; audioTrack: MP4Track; mp4: MP4BoxFile }> {
     const MP4Box = MP4BoxLib;
     const mp4 = MP4Box.createFile();
-    const fileSize = await fetchContentLength(url);
+    const fileSize = await file.fetchSize();
 
     const infoPromise = new Promise<MP4Info>((resolve, reject) => {
       mp4.onReady = resolve;
       mp4.onError = reject;
-      this.streamToMP4Box(mp4, url, fileSize).catch(reject);
+      this.streamToMP4Box(mp4, file, fileSize).catch(reject);
     });
     const timeout = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('Timeout: could not parse MP4 metadata within 30s')), 30000)
@@ -376,7 +367,7 @@ export class Mp4Plugin extends BasePlugin {
 
   private async streamToMP4Box(
     mp4: MP4BoxFile,
-    url: string,
+    file: RemoteFile,
     fileSize: number | null,
   ): Promise<void> {
     const chunkSize = 256 * 1024;
@@ -385,7 +376,7 @@ export class Mp4Plugin extends BasePlugin {
 
     while (offset < totalSize) {
       const end = Math.min(offset + chunkSize - 1, totalSize - 1);
-      const data = await fetchRange(url, offset, end);
+      const data = await file.getRange(offset, end);
       const ab = data.buffer.slice(
         data.byteOffset,
         data.byteOffset + data.byteLength,
@@ -406,7 +397,7 @@ export class Mp4Plugin extends BasePlugin {
     // If moov is at the end, fetch the tail
     if (fileSize && offset < fileSize) {
       const tailStart = Math.max(offset, fileSize - 2 * 1024 * 1024);
-      const tailData = await fetchRange(url, tailStart, fileSize - 1);
+      const tailData = await file.getRange(tailStart, fileSize - 1);
       const ab = tailData.buffer.slice(
         tailData.byteOffset,
         tailData.byteOffset + tailData.byteLength,

@@ -73,6 +73,82 @@ export async function fetchContentLength(
   return null;
 }
 
+// ─── RemoteFile — per-operation file handle ──────────────────────────────────
+
+/**
+ * Wraps a URL for efficient byte access. On the first getRange() call it probes
+ * whether the server supports HTTP Range requests. If the server returns 200
+ * (full file), the data is kept in memory and all subsequent getRange() calls
+ * are served locally — the file is never re-downloaded.
+ *
+ * Create one RemoteFile per decode() call, let it go when done.
+ */
+export class RemoteFile {
+  private url: string;
+  private fullData: Uint8Array | null = null;
+  private _size: number | null = null;
+  private _rangeSupported: boolean | null = null;
+
+  constructor(url: string) {
+    this.url = url;
+  }
+
+  get rangeSupported(): boolean | null {
+    return this._rangeSupported;
+  }
+
+  get size(): number | null {
+    return this._size;
+  }
+
+  /** Fetch content length via HEAD (does not download body). */
+  async fetchSize(): Promise<number | null> {
+    if (this._size !== null) return this._size;
+    if (this.fullData) {
+      this._size = this.fullData.length;
+      return this._size;
+    }
+    this._size = await fetchContentLength(this.url);
+    return this._size;
+  }
+
+  /** Read a byte range. Detects Range support on first call. */
+  async getRange(start: number, end: number): Promise<Uint8Array> {
+    // Already have the whole file in memory — just slice
+    if (this.fullData) {
+      return this.fullData.slice(start, end + 1);
+    }
+
+    const resp = await fetch(this.url, {
+      headers: { Range: `bytes=${start}-${end}` },
+    });
+    if (!resp.ok && resp.status !== 206) {
+      throw new Error(`HTTP ${resp.status} fetching range ${start}-${end} from ${this.url}`);
+    }
+
+    const data = new Uint8Array(await resp.arrayBuffer());
+
+    if (resp.status === 206) {
+      this._rangeSupported = true;
+      // Pick up total size from Content-Range if we don't have it yet
+      if (this._size === null) {
+        const cr = resp.headers.get('content-range');
+        if (cr) {
+          const m = cr.match(/\/(\d+)/);
+          if (m) this._size = parseInt(m[1], 10);
+        }
+      }
+      return data;
+    }
+
+    // Server returned 200 (full file) — keep it, never re-download
+    this._rangeSupported = false;
+    this.fullData = data;
+    this._size = data.length;
+    return data.slice(start, end + 1);
+  }
+}
+
 export function trimBySamples(
   ctx: BaseAudioContext,
   buffer: AudioBuffer,
