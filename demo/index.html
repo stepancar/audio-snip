@@ -41,7 +41,12 @@
     .badge { display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px; font-size: 0.7rem; font-weight: 600; }
     .badge-206 { background: #dcfce7; color: #166534; }
     .badge-200 { background: #fef3c7; color: #92400e; }
+    .badge-head { background: #e0e7ff; color: #3730a3; }
+    .badge-unknown { background: #f3f4f6; color: #888; }
     .sw-status { padding: 0.5rem 1rem; font-size: 0.8rem; color: #888; border-top: 1px solid #f0f0f0; }
+    .server-range-row { padding: 0.6rem 1rem; border-top: 1px solid #f0f0f0; font-size: 0.85rem; display: flex; align-items: center; gap: 0.5rem; }
+    .server-range-row strong { white-space: nowrap; }
+    .savings { color: #dc2626; font-size: 0.7rem; margin-left: 0.25rem; }
 
     /* ── Transfer bar ── */
     #transfer-bar { margin-top: 1rem; padding: 0.75rem 1rem; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; }
@@ -115,16 +120,20 @@
   <!-- Network log panel -->
   <details id="network-panel" open>
     <summary>
-      Range requests
-      <span id="network-summary">waiting for Service Worker...</span>
+      Network log
+      <span id="network-summary">0 requests</span>
     </summary>
+    <div class="server-range-row">
+      <strong>Server Range support:</strong>
+      <span class="badge badge-unknown" id="server-range-badge">unknown</span>
+    </div>
     <div id="network-log">
       <div class="net-row net-header">
         <span>File</span>
-        <span>Range</span>
-        <span>Received</span>
-        <span>Total</span>
-        <span>Status</span>
+        <span>Requested range</span>
+        <span>Origin HTTP</span>
+        <span>Server sent</span>
+        <span>Client got</span>
       </div>
     </div>
     <div class="sw-status" id="sw-status">Registering Service Worker...</div>

@@ -1,16 +1,6 @@
 import { audioSnip } from '../src/core.js';
 import { Mp3Plugin } from '../src/plugins/mp3.js';
 import { Mp4Plugin } from '../src/plugins/mp4.js';
-interface RangeLogEntry {
-  type: 'range-request';
-  url: string;
-  requestedRange: string | null;
-  status: number;
-  responseBytes: number;
-  totalBytes: number | null;
-  rangeSupported: boolean;
-  timestamp: number;
-}
 
 audioSnip.register(new Mp3Plugin({ paddingFrames: 8 }));
 audioSnip.register(new Mp4Plugin());
@@ -34,6 +24,7 @@ const swStatus = document.getElementById('sw-status')!;
 const transferBar = document.getElementById('transfer-bar')!;
 const transferFill = document.getElementById('transfer-fill')!;
 const transferLabel = document.getElementById('transfer-label')!;
+const serverRangeBadge = document.getElementById('server-range-badge')!;
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -41,111 +32,219 @@ let audioBuffer: AudioBuffer | null = null;
 let audioCtx: AudioContext | null = null;
 let sourceNode: AudioBufferSourceNode | null = null;
 
-let totalBytesTransferred = 0;
+let totalServerBytes = 0;   // total downloaded from origin
+let totalClientBytes = 0;   // total delivered to library
 let fileTotalSize: number | null = null;
 let requestCount = 0;
+let serverSupportsRange: boolean | null = null;
 
-// ─── Service Worker registration ─────────────────────────────────────────────
+// ─── Fetch wrapper — reads X-SW-* headers for full picture ───────────────────
 
-async function registerSW(): Promise<void> {
-  if (!('serviceWorker' in navigator)) {
-    swStatus.textContent = 'Service Worker not supported in this browser.';
-    return;
-  }
-  try {
-    // In dev, Vite serves sw.js from demo/; in prod, it's in the build output
-    const base = import.meta.env.BASE_URL || '/';
-    const reg = await navigator.serviceWorker.register(
-      base + 'sw.js',
-      { scope: base },
-    );
-    swStatus.textContent = reg.active
-      ? 'Service Worker active'
-      : 'Service Worker installing...';
+const originalFetch = window.fetch.bind(window);
 
-    // Wait for the SW to become active
-    if (!reg.active) {
-      await new Promise<void>((resolve) => {
-        const sw = reg.installing || reg.waiting;
-        if (!sw) return resolve();
-        sw.addEventListener('statechange', () => {
-          if (sw.state === 'activated') {
-            swStatus.textContent = 'Service Worker active';
-            resolve();
-          }
-        });
-      });
+window.fetch = async function (input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const req = new Request(input, init);
+  const rangeHeader = req.headers.get('Range');
+
+  const resp = await originalFetch(input, init);
+
+  // Log Range requests and HEAD requests
+  if (rangeHeader || req.method === 'HEAD') {
+    // Read SW metadata headers (present when SW is active)
+    const swServerStatus = resp.headers.get('X-SW-Server-Status');
+    const swServerBytes = resp.headers.get('X-SW-Server-Bytes');
+    const swClientBytes = resp.headers.get('X-SW-Client-Bytes');
+    const swFileSize = resp.headers.get('X-SW-File-Size');
+    const hasSW = swServerStatus !== null;
+
+    // For client bytes: if SW reported, use that; otherwise read body
+    let clientBytes = 0;
+    if (req.method !== 'HEAD') {
+      if (swClientBytes) {
+        clientBytes = parseInt(swClientBytes, 10);
+      } else {
+        // No SW — read clone to measure
+        const clone = resp.clone();
+        clientBytes = (await clone.arrayBuffer()).byteLength;
+      }
     }
-  } catch (err) {
-    swStatus.textContent = `SW registration failed: ${err}`;
-    console.error('SW registration error:', err);
+
+    // Server bytes (what SW actually downloaded from origin)
+    const serverBytes = swServerBytes ? parseInt(swServerBytes, 10) : clientBytes;
+
+    // File size
+    let fileSize: number | null = null;
+    if (swFileSize) {
+      fileSize = parseInt(swFileSize, 10);
+    } else {
+      const cr = resp.headers.get('Content-Range');
+      if (cr) {
+        const m = cr.match(/\/(\d+)/);
+        if (m) fileSize = parseInt(m[1], 10);
+      }
+    }
+
+    // Actual origin server status
+    const originStatus = swServerStatus ? parseInt(swServerStatus, 10) : resp.status;
+
+    addLogEntry({
+      method: req.method,
+      url: shortUrl(req.url),
+      requestedRange: rangeHeader,
+      originStatus,
+      serverBytes,
+      clientBytes,
+      fileSize,
+      hasSW,
+    });
   }
+
+  return resp;
+};
+
+// ─── Logging UI ──────────────────────────────────────────────────────────────
+
+interface LogEntry {
+  method: string;
+  url: string;
+  requestedRange: string | null;
+  originStatus: number;    // what the real server returned
+  serverBytes: number;     // bytes SW downloaded from server
+  clientBytes: number;     // bytes delivered to the library
+  fileSize: number | null;
+  hasSW: boolean;          // was SW involved?
 }
 
-// ─── Listen for SW messages ──────────────────────────────────────────────────
-
-navigator.serviceWorker?.addEventListener('message', (event) => {
-  const msg = event.data;
-  if (msg.type === 'range-request') {
-    addLogEntry(msg as RangeLogEntry);
-  } else if (msg.type === 'sw-ready') {
-    swStatus.textContent = 'Service Worker active';
-  }
-});
-
-function addLogEntry(entry: RangeLogEntry): void {
+function addLogEntry(entry: LogEntry): void {
   requestCount++;
 
-  // Parse range for display
-  const rangeMatch = entry.requestedRange?.match(/bytes=(\d+)-(\d+)/);
-  const rangeDisplay = rangeMatch
-    ? `${fmtBytes(+rangeMatch[1])}–${fmtBytes(+rangeMatch[2])}`
-    : entry.requestedRange || '—';
+  // Detect server Range support from first real Range request
+  if (entry.requestedRange && entry.method !== 'HEAD' && serverSupportsRange === null) {
+    serverSupportsRange = entry.originStatus === 206;
+    updateServerRangeBadge();
+  }
+
+  // Requested range display
+  const rangeMatch = entry.requestedRange?.match(/bytes=(\d+)-(\d+)?/);
+  let rangeDisplay: string;
+  if (entry.method === 'HEAD') {
+    rangeDisplay = 'HEAD';
+  } else if (rangeMatch) {
+    rangeDisplay = `${fmtBytes(+rangeMatch[1])} – ${rangeMatch[2] ? fmtBytes(+rangeMatch[2]) : 'end'}`;
+  } else {
+    rangeDisplay = '—';
+  }
+
+  // Origin status badge
+  let statusHtml: string;
+  if (entry.method === 'HEAD') {
+    statusHtml = '<span class="badge badge-head">HEAD</span>';
+  } else if (entry.originStatus === 206) {
+    statusHtml = '<span class="badge badge-206">206</span>';
+  } else {
+    statusHtml = `<span class="badge badge-200">${entry.originStatus}</span>`;
+  }
+
+  // Server vs client bytes
+  const serverBytesStr = entry.method === 'HEAD' ? '—' : fmtBytes(entry.serverBytes);
+  const clientBytesStr = entry.method === 'HEAD' ? '—' : fmtBytes(entry.clientBytes);
+
+  // Savings indicator (when SW sliced a full response)
+  let savingsHtml = '';
+  if (entry.method !== 'HEAD' && entry.originStatus !== 206 && entry.serverBytes > entry.clientBytes) {
+    const saved = entry.serverBytes - entry.clientBytes;
+    savingsHtml = `<span class="savings">-${fmtBytes(saved)}</span>`;
+  }
 
   const row = document.createElement('div');
   row.className = 'net-row';
   row.innerHTML = `
     <span title="${entry.url}">${entry.url}</span>
     <span>${rangeDisplay}</span>
-    <span>${fmtBytes(entry.responseBytes)}</span>
-    <span>${entry.totalBytes != null ? fmtBytes(entry.totalBytes) : '?'}</span>
-    <span><span class="badge ${entry.rangeSupported ? 'badge-206' : 'badge-200'}">${entry.rangeSupported ? '206' : '200→slice'}</span></span>
+    <span>${statusHtml}</span>
+    <span>${serverBytesStr}</span>
+    <span>${clientBytesStr} ${savingsHtml}</span>
   `;
   networkLog.appendChild(row);
   networkLog.scrollTop = networkLog.scrollHeight;
 
   // Update totals
-  totalBytesTransferred += entry.responseBytes;
-  if (entry.totalBytes != null && (fileTotalSize === null || entry.totalBytes > fileTotalSize)) {
-    fileTotalSize = entry.totalBytes;
+  if (entry.method !== 'HEAD') {
+    totalServerBytes += entry.serverBytes;
+    totalClientBytes += entry.clientBytes;
+  }
+  if (entry.fileSize != null && (fileTotalSize === null || entry.fileSize > fileTotalSize)) {
+    fileTotalSize = entry.fileSize;
   }
 
   updateTransferBar();
-  networkSummary.textContent = `${requestCount} requests, ${fmtBytes(totalBytesTransferred)} transferred`;
+  networkSummary.textContent = `${requestCount} req, ${fmtBytes(totalClientBytes)} received`;
+}
+
+function updateServerRangeBadge(): void {
+  if (serverSupportsRange === null) {
+    serverRangeBadge.textContent = 'not tested yet';
+    serverRangeBadge.className = 'badge badge-unknown';
+  } else if (serverSupportsRange) {
+    serverRangeBadge.textContent = 'YES — server returns 206 Partial Content';
+    serverRangeBadge.className = 'badge badge-206';
+  } else {
+    serverRangeBadge.textContent = 'NO — SW downloads full file and slices locally';
+    serverRangeBadge.className = 'badge badge-200';
+  }
 }
 
 function updateTransferBar(): void {
   transferBar.hidden = false;
 
   if (fileTotalSize && fileTotalSize > 0) {
-    const pct = Math.min(100, (totalBytesTransferred / fileTotalSize) * 100);
+    const pct = Math.min(100, (totalClientBytes / fileTotalSize) * 100);
     transferFill.style.width = `${pct}%`;
-    transferLabel.textContent = `${fmtBytes(totalBytesTransferred)} / ${fmtBytes(fileTotalSize)} (${pct.toFixed(1)}%)`;
+    transferLabel.textContent = `${fmtBytes(totalClientBytes)} / ${fmtBytes(fileTotalSize)} (${pct.toFixed(1)}%)`;
   } else {
     transferFill.style.width = '0%';
-    transferLabel.textContent = `${fmtBytes(totalBytesTransferred)} / ?`;
+    transferLabel.textContent = `${fmtBytes(totalClientBytes)} / ?`;
   }
 }
 
 function resetNetworkLog(): void {
-  // Remove all rows except header
   const rows = networkLog.querySelectorAll('.net-row:not(.net-header)');
   rows.forEach((r) => r.remove());
-  totalBytesTransferred = 0;
+  totalServerBytes = 0;
+  totalClientBytes = 0;
   fileTotalSize = null;
   requestCount = 0;
+  serverSupportsRange = null;
   networkSummary.textContent = '0 requests';
   transferBar.hidden = true;
+  updateServerRangeBadge();
+}
+
+// ─── Service Worker registration ─────────────────────────────────────────────
+
+async function registerSW(): Promise<void> {
+  if (!('serviceWorker' in navigator)) {
+    swStatus.textContent = 'Not supported — Range fallback unavailable';
+    return;
+  }
+  try {
+    const base = (import.meta as unknown as { env: { BASE_URL: string } }).env.BASE_URL || '/';
+    const reg = await navigator.serviceWorker.register(base + 'sw.js', { scope: base });
+
+    if (reg.active) {
+      swStatus.textContent = 'Service Worker active — Range fallback ready';
+    } else {
+      swStatus.textContent = 'Service Worker installing...';
+      const sw = reg.installing || reg.waiting;
+      sw?.addEventListener('statechange', () => {
+        if (sw.state === 'activated') {
+          swStatus.textContent = 'Service Worker active — Range fallback ready';
+        }
+      });
+    }
+  } catch (err) {
+    swStatus.textContent = `SW failed: ${err}`;
+  }
 }
 
 // ─── File list ───────────────────────────────────────────────────────────────
@@ -156,24 +255,16 @@ fileList.addEventListener('click', (e) => {
   const btn = (e.target as HTMLElement).closest('.file-btn') as HTMLElement | null;
   if (!btn) return;
 
-  // Update selection
   fileList.querySelectorAll('.file-btn').forEach((b) => b.classList.remove('selected'));
   btn.classList.add('selected');
-
-  // Update URL input
   urlInput.value = btn.dataset.url || '';
 
-  // Update slider max to match file duration
   const dur = btn.dataset.duration || '660';
   startSlider.max = dur;
   endSlider.max = dur;
-
-  // Reset end slider to a reasonable default (30s or file duration, whichever is less)
   const maxEnd = Math.min(30, parseFloat(dur));
   endSlider.value = String(maxEnd);
   endVal.textContent = maxEnd.toFixed(1);
-
-  // Reset start to 10 or 0
   const startDefault = Math.min(10, parseFloat(dur) - maxEnd);
   startSlider.value = String(Math.max(0, startDefault));
   startVal.textContent = Math.max(0, startDefault).toFixed(1);
@@ -228,10 +319,7 @@ playBtn.addEventListener('click', () => {
   sourceNode = audioCtx.createBufferSource();
   sourceNode.buffer = audioBuffer;
   sourceNode.connect(audioCtx.destination);
-  sourceNode.onended = () => {
-    stopBtn.disabled = true;
-    playBtn.disabled = false;
-  };
+  sourceNode.onended = () => { stopBtn.disabled = true; playBtn.disabled = false; };
   sourceNode.start();
   stopBtn.disabled = false;
 });
@@ -255,17 +343,13 @@ function drawWaveform(buffer: AudioBuffer): void {
   canvas.width = canvas.clientWidth * dpr;
   canvas.height = canvas.clientHeight * dpr;
   ctx.scale(dpr, dpr);
-
   const w = canvas.clientWidth;
   const h = canvas.clientHeight;
   ctx.clearRect(0, 0, w, h);
-
   const data = buffer.getChannelData(0);
   const step = Math.ceil(data.length / w);
-
   ctx.fillStyle = '#2563eb';
   const mid = h / 2;
-
   for (let x = 0; x < w; x++) {
     const s = x * step;
     let min = 1, max = -1;
@@ -274,9 +358,7 @@ function drawWaveform(buffer: AudioBuffer): void {
       if (v < min) min = v;
       if (v > max) max = v;
     }
-    const top = mid + min * mid;
-    const bottom = mid + max * mid;
-    ctx.fillRect(x, top, 1, bottom - top || 1);
+    ctx.fillRect(x, mid + min * mid, 1, (max - min) * mid || 1);
   }
 }
 
@@ -288,6 +370,16 @@ function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function shortUrl(url: string): string {
+  try {
+    const name = new URL(url).pathname.split('/').pop() || url;
+    return name.length > 40 ? name.slice(0, 37) + '...' : name;
+  } catch {
+    return url.length > 40 ? url.slice(0, 37) + '...' : url;
+  }
+}
+
 // ─── Init ────────────────────────────────────────────────────────────────────
 
+updateServerRangeBadge();
 registerSW();

@@ -1,12 +1,12 @@
-// Service Worker: intercepts Range requests, logs them to the UI,
-// and provides Range fallback for servers that don't support it.
+// Service Worker: intercepts Range requests and provides Range fallback.
+// Adds X-SW-* headers so the main thread can display the full picture:
+//   X-SW-Server-Status  — actual HTTP status from origin server (200 or 206)
+//   X-SW-Server-Bytes   — bytes downloaded from server
+//   X-SW-Client-Bytes   — bytes delivered to client (after slicing)
+//   X-SW-File-Size      — total file size (if known)
 
 self.addEventListener('install', () => self.skipWaiting());
-
-self.addEventListener('activate', (event) => {
-  event.waitUntil(self.clients.claim());
-  broadcast({ type: 'sw-ready' });
-});
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 
 self.addEventListener('fetch', (event) => {
   const rangeHeader = event.request.headers.get('Range');
@@ -16,48 +16,44 @@ self.addEventListener('fetch', (event) => {
 
 async function handleRange(req, rangeHeader) {
   const resp = await fetch(req);
+  const serverStatus = resp.status;
 
-  const entry = {
-    type: 'range-request',
-    url: shortUrl(req.url),
-    requestedRange: rangeHeader,
-    status: resp.status,
-    responseBytes: 0,
-    totalBytes: null,
-    rangeSupported: resp.status === 206,
-    timestamp: Date.now(),
-  };
-
-  // Server supports Range (206)
-  if (resp.status === 206) {
+  // ── Server supports Range (206) — pass through ──
+  if (serverStatus === 206) {
+    const body = await resp.arrayBuffer();
     const cr = resp.headers.get('Content-Range');
+    let fileSize = '';
     if (cr) {
       const m = cr.match(/\/(\d+)/);
-      if (m) entry.totalBytes = parseInt(m[1], 10);
+      if (m) fileSize = m[1];
     }
-    const body = await resp.arrayBuffer();
-    entry.responseBytes = body.byteLength;
-    broadcast(entry);
-    return new Response(body, { status: 206, headers: resp.headers });
+
+    const headers = new Headers(resp.headers);
+    headers.set('X-SW-Server-Status', '206');
+    headers.set('X-SW-Server-Bytes', String(body.byteLength));
+    headers.set('X-SW-Client-Bytes', String(body.byteLength));
+    if (fileSize) headers.set('X-SW-File-Size', fileSize);
+
+    return new Response(body, { status: 206, headers });
   }
 
-  // Server returned full file (200) — slice it ourselves
+  // ── Server returned full file (200) — slice it ──
   const fullBody = await resp.arrayBuffer();
-  entry.totalBytes = fullBody.byteLength;
+  const serverBytes = fullBody.byteLength;
 
   const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
   if (!match) {
-    entry.responseBytes = fullBody.byteLength;
-    broadcast(entry);
-    return new Response(fullBody);
+    const headers = new Headers();
+    headers.set('X-SW-Server-Status', String(serverStatus));
+    headers.set('X-SW-Server-Bytes', String(serverBytes));
+    headers.set('X-SW-Client-Bytes', String(serverBytes));
+    headers.set('X-SW-File-Size', String(serverBytes));
+    return new Response(fullBody, { headers });
   }
 
   const start = parseInt(match[1], 10);
   const end = match[2] ? parseInt(match[2], 10) : fullBody.byteLength - 1;
   const slice = fullBody.slice(start, end + 1);
-
-  entry.responseBytes = slice.byteLength;
-  broadcast(entry);
 
   return new Response(slice, {
     status: 206,
@@ -65,20 +61,10 @@ async function handleRange(req, rangeHeader) {
       'Content-Range': 'bytes ' + start + '-' + end + '/' + fullBody.byteLength,
       'Content-Length': String(slice.byteLength),
       'Content-Type': resp.headers.get('Content-Type') || 'application/octet-stream',
+      'X-SW-Server-Status': String(serverStatus),
+      'X-SW-Server-Bytes': String(serverBytes),
+      'X-SW-Client-Bytes': String(slice.byteLength),
+      'X-SW-File-Size': String(fullBody.byteLength),
     },
   });
-}
-
-function shortUrl(url) {
-  try {
-    const name = new URL(url).pathname.split('/').pop() || url;
-    return name.length > 50 ? name.slice(0, 47) + '...' : name;
-  } catch {
-    return url.slice(0, 50);
-  }
-}
-
-async function broadcast(msg) {
-  const clients = await self.clients.matchAll({ type: 'window' });
-  for (const c of clients) c.postMessage(msg);
 }
