@@ -4,7 +4,10 @@
   "description": "Decode audio segments from remote files via HTTP Range requests",
   "license": "MIT",
   "author": "Stepan Mikhailiuk",
-  "repository": "stepancar/audio-snip",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stepancar/audio-snip.git"
+  },
   "type": "module",
   "files": ["dist", "LICENSE", "README.md"],
   "exports": {
